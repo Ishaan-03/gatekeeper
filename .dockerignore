@@ -1,0 +1,10 @@
+.git
+.env
+infra/
+k8s/
+docs/
+.github/
+.pre-commit-config.yaml
+Dockerfile
+*.md
+__pycache__/
