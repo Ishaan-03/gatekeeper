@@ -81,14 +81,66 @@ jobs:
   build-scan:
     needs: [secrets, sast, iac, sca]
     runs-on: ubuntu-24.04
+    env:
+      IMAGE: gatekeeper:${{ github.sha }}
     steps:
-      - run: echo "build the image, scan it, make the SBOM"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: docker build -t "$IMAGE" .
+      - name: Install trivy and check its fingerprint
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum --check
+          tar -xzf trivy.tar.gz trivy
+          sudo install -m 0755 trivy /usr/local/bin/trivy
+      - name: Scan the finished image (the gate)
+        run: trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+      - name: Write the ingredient list (SBOM)
+        run: trivy image --format cyclonedx --output sbom.cdx.json "$IMAGE"
+      - name: Seal the image into a file
+        run: docker save "$IMAGE" -o image.tar
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image
+          path: image.tar
+          retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          retention-days: 30
 
   dast:
     needs: build-scan
     runs-on: ubuntu-24.04
+    env:
+      IMAGE: gatekeeper:${{ github.sha }}
     steps:
-      - run: echo "run the app and poke it from outside with ZAP"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image
+      - name: Load the image and start the app
+        run: |
+          docker load -i image.tar
+          docker run -d --name gk -p 8080:8080 "$IMAGE"
+          for i in $(seq 1 20); do
+            curl -fs http://localhost:8080/health && break
+            sleep 1
+          done
+      - name: Let ZAP poke the running app
+        run: |
+          mkdir -p "$RUNNER_TEMP/zap"
+          chmod 777 "$RUNNER_TEMP/zap"
+          docker run --rm --network host -v "$RUNNER_TEMP/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t http://localhost:8080/health -I -r report.html
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: zap-report
+          path: ${{ runner.temp }}/zap/report.html
+          retention-days: 7
 
   publish:
     needs: [build-scan, dast]
