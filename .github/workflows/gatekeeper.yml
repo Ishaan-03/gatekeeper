@@ -1,0 +1,52 @@
+name: gatekeeper
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "gitleaks will look for leaked secrets here"
+
+  sast:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "semgrep will check our own code here"
+
+  iac:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "checkov will check our config files here"
+
+  sca:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "trivy will check our borrowed packages here"
+
+  build-scan:
+    needs: [secrets, sast, iac, sca]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "build the image, scan it, make the SBOM"
+
+  dast:
+    needs: build-scan
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "run the app and poke it from outside with ZAP"
+
+  publish:
+    needs: [build-scan, dast]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - run: echo "get a boarding pass, assume the Day 2 role, push to ECR"
