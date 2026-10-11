@@ -8,26 +8,75 @@ on:
 permissions:
   contents: read
 
+env:
+  GITLEAKS_VERSION: 8.21.2
+  GITLEAKS_SHA256: 5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba
+  SEMGREP_VERSION: 1.178.0
+  CHECKOV_VERSION: 3.3.19
+  TRIVY_VERSION: 0.71.2
+  TRIVY_SHA256: 0510e71e2fd39bf863856d499c8dc19feb4e7336546394c502a8f5cc7ab27460
+
 jobs:
   secrets:
     runs-on: ubuntu-24.04
     steps:
-      - run: echo "gitleaks will look for leaked secrets here"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks and check its fingerprint
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum --check
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+      - name: Scan the whole git history
+        run: gitleaks git -v --redact
 
   sast:
     runs-on: ubuntu-24.04
     steps:
-      - run: echo "semgrep will check our own code here"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install semgrep (exact version)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "semgrep==${SEMGREP_VERSION}"
+      - name: Check our own code
+        run: |
+          "$RUNNER_TEMP/venv/bin/semgrep" scan --config p/python --config p/flask --metrics=off --error app/
 
   iac:
     runs-on: ubuntu-24.04
     steps:
-      - run: echo "checkov will check our config files here"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install checkov (exact version)
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "checkov==${CHECKOV_VERSION}"
+      - name: Check our config files
+        run: |
+          "$RUNNER_TEMP/venv/bin/checkov" -d . --framework terraform dockerfile github_actions --quiet --compact
 
   sca:
     runs-on: ubuntu-24.04
     steps:
-      - run: echo "trivy will check our borrowed packages here"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install trivy and check its fingerprint
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o trivy.tar.gz "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum --check
+          tar -xzf trivy.tar.gz trivy
+          sudo install -m 0755 trivy /usr/local/bin/trivy
+      - name: Check borrowed packages
+        run: trivy fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 app/
 
   build-scan:
     needs: [secrets, sast, iac, sca]
