@@ -1,5 +1,6 @@
 import ipaddress
 import socket
+import subprocess
 
 from flask import Flask, jsonify, request
 
@@ -17,25 +18,8 @@ def health():
 @app.get("/ping")
 def ping():
     host = request.args.get("host", "")
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return jsonify(error="host must be a valid IP address"), 400
-
-    # An IPv4 address written in IPv6 form (::ffff:127.0.0.1) is judged as IPv4.
-    if getattr(address, "ipv4_mapped", None):
-        address = address.ipv4_mapped
-
-    # Only public addresses: no loopback, private ranges or the cloud metadata service.
-    if not address.is_global:
-        return jsonify(error="only public IP addresses can be checked"), 400
-
-    try:
-        with socket.create_connection((str(address), CHECK_PORT), timeout=CHECK_TIMEOUT_SECONDS):
-            reachable = True
-    except OSError:
-        reachable = False
-    return jsonify(host=str(address), port=CHECK_PORT, reachable=reachable)
+    out = subprocess.run(f"ping -c 1 {host}", shell=True, capture_output=True, text=True)
+    return jsonify(output=out.stdout)
 
 
 @app.after_request
