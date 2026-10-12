@@ -128,6 +128,12 @@ jobs:
             exit 1
           fi
           echo "::notice title=Image scan::No HIGH or CRITICAL vulnerability with a fix available"
+      - name: Count all HIGH and CRITICAL findings, fixed or not (report only)
+        run: |
+          trivy image --severity HIGH,CRITICAL --format json --output trivy-all.json "$IMAGE"
+          high=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-all.json)
+          critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-all.json)
+          echo "::notice title=Image scan totals::$high HIGH and $critical CRITICAL in total, none of them fixable yet"
       - name: Write the SBOM (CycloneDX)
         run: trivy image --format cyclonedx --output sbom.cdx.json "$IMAGE"
       - name: Save the image as a file for the next jobs
