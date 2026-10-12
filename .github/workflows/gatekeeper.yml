@@ -18,7 +18,7 @@ env:
   TRIVY_SHA256: 0510e71e2fd39bf863856d499c8dc19feb4e7336546394c502a8f5cc7ab27460
   KIND_VERSION: 0.33.0
   KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
-  ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:2.17.0
+  ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:2.17.0@sha256:7aaa659b0d43078febd82e29bad112285c370727e86ab8340444220e17d9f0d2
   AWS_REGION: eu-west-3
 
 jobs:
