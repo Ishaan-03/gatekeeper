@@ -1,0 +1,5 @@
+# Client namespace used to test the NetworkPolicy from outside the restricted namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: probe
