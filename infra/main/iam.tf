@@ -4,6 +4,14 @@ data "aws_iam_openid_connect_provider" "github" {
   url = "https://token.actions.githubusercontent.com"
 }
 
+# GitHub writes the sub claim with the numeric owner and repo IDs, for example
+# repo:Ishaan-03@166810647/gatekeeper@1414191999:ref:refs/heads/main
+# IDs are never reused, so a deleted and recreated repo with the same name
+# cannot assume this role.
+locals {
+  github_subject = "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}:ref:refs/heads/main"
+}
+
 data "aws_iam_policy_document" "gha_trust" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
@@ -19,7 +27,7 @@ data "aws_iam_policy_document" "gha_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:ref:refs/heads/main"]
+      values   = [local.github_subject]
     }
   }
 }
