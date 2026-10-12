@@ -1,0 +1,11 @@
+# A pod with no security settings at all. The "restricted" namespace must refuse it.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-security-context
+  namespace: gatekeeper
+spec:
+  containers:
+    - name: api
+      image: gatekeeper:local
+      imagePullPolicy: IfNotPresent

@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Actions are pinned to commit SHAs. Dependabot moves the SHA and the version comment together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Flask and Werkzeug must move together, so all Python updates come as one pull request.
+  - package-ecosystem: pip
+    directory: /app
+    schedule:
+      interval: weekly
+    groups:
+      python:
+        patterns: ["*"]
+
+  # The base image is pinned by digest. A pinned image stops getting OS fixes until the pin moves.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

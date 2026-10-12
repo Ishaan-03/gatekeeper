@@ -1,0 +1,34 @@
+# Start from "nobody may connect to anything in this namespace".
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: gatekeeper
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# Then open exactly one door: port 8080, only for labelled pods in the probe namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-from-labelled-clients
+  namespace: gatekeeper
+spec:
+  podSelector:
+    matchLabels:
+      app: gatekeeper
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: probe
+          podSelector:
+            matchLabels:
+              access: "true"
+      ports:
+        - protocol: TCP
+          port: 8080

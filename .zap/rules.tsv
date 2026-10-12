@@ -1,0 +1,4 @@
+# ZAP baseline rules for GATEKEEPER.
+# Any alert not listed here fails the pipeline. Each line below needs a reason.
+# Format: rule id <TAB> IGNORE|INFO|WARN|FAIL <TAB> (rule name and reason)
+10049	INFO	(Non-Storable Content: every response sends Cache-Control no-store on purpose, so nothing is kept in shared caches)
