@@ -301,6 +301,16 @@ jobs:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           role-session-name: gatekeeper-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
+      - name: Show the OIDC token claims (only when the AWS login fails)
+        if: failure()
+        # Prints only the decoded claims, never the signed token itself.
+        run: |
+          token=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          payload=$(echo "$token" | cut -d. -f2 | tr '_-' '/+')
+          while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="$payload="; done
+          claims=$(echo "$payload" | base64 -d | jq -c '{sub, aud, iss, repository, ref, event_name}')
+          echo "::error title=OIDC claims::$claims"
       - name: Log in to ECR
         run: aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
       - name: Push the exact image that was scanned and tested
