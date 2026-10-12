@@ -1,0 +1,3 @@
+# ZAP baseline rules for GATEKEEPER.
+# Any alert not listed here fails the pipeline. Each line below needs a reason.
+# Format: rule id <TAB> IGNORE|INFO|WARN|FAIL <TAB> (rule name and reason)

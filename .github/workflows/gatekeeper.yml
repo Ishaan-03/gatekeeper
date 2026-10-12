@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
 
+# Every job starts with a read-only token. Only publish gets more.
 permissions:
   contents: read
 
@@ -15,6 +16,10 @@ env:
   CHECKOV_VERSION: 3.3.19
   TRIVY_VERSION: 0.71.2
   TRIVY_SHA256: 0510e71e2fd39bf863856d499c8dc19feb4e7336546394c502a8f5cc7ab27460
+  KIND_VERSION: 0.33.0
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+  ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:2.17.0
+  AWS_REGION: eu-west-3
 
 jobs:
   secrets:
@@ -44,9 +49,14 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet "semgrep==${SEMGREP_VERSION}"
-      - name: Check our own code
+      - name: Scan our own code
         run: |
-          "$RUNNER_TEMP/venv/bin/semgrep" scan --config p/python --config p/flask --metrics=off --error app/
+          "$RUNNER_TEMP/venv/bin/semgrep" scan --config p/python --config p/flask \
+            --metrics=off --error --json-output=semgrep.json app/
+      - name: Show findings on the pull request
+        if: failure()
+        run: |
+          jq -r '.results[] | "::error file=\(.path),line=\(.start.line),title=\(.check_id)::\(.extra.message | gsub("\n"; " "))"' semgrep.json
 
   iac:
     runs-on: ubuntu-24.04
@@ -58,9 +68,21 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet "checkov==${CHECKOV_VERSION}"
-      - name: Check our config files
+      - name: Scan Terraform, Dockerfile, Kubernetes and workflow files
+        # k8s/tests holds a pod that is broken on purpose, to prove Pod Security rejects it.
         run: |
-          "$RUNNER_TEMP/venv/bin/checkov" -d . --framework terraform dockerfile github_actions --quiet --compact
+          "$RUNNER_TEMP/venv/bin/checkov" -d . --framework terraform dockerfile kubernetes github_actions \
+            --skip-path k8s/tests --quiet --compact
+      - name: Make sure the workflow file was really scanned
+        # A schema problem in a workflow makes Checkov skip the file without any error.
+        run: |
+          count=$("$RUNNER_TEMP/venv/bin/checkov" -d . --framework github_actions --quiet -o json \
+            | jq '[.. | objects | select(has("summary")) | .summary | ((.passed // 0) + (.failed // 0) + (.skipped // 0))] | add // 0')
+          echo "Workflow checks run: $count"
+          if [ "${count:-0}" -eq 0 ]; then
+            echo "::error title=Checkov::Checkov ran no checks on the workflow file"
+            exit 1
+          fi
 
   sca:
     runs-on: ubuntu-24.04
@@ -75,7 +97,7 @@ jobs:
           echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum --check
           tar -xzf trivy.tar.gz trivy
           sudo install -m 0755 trivy /usr/local/bin/trivy
-      - name: Check borrowed packages
+      - name: Scan dependencies
         run: trivy fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 app/
 
   build-scan:
@@ -96,12 +118,22 @@ jobs:
           echo "${TRIVY_SHA256}  trivy.tar.gz" | sha256sum --check
           tar -xzf trivy.tar.gz trivy
           sudo install -m 0755 trivy /usr/local/bin/trivy
-      - name: Scan the finished image (the gate)
-        run: trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
-      - name: Write the ingredient list (SBOM)
+      - name: Scan the finished image (gate)
+        run: |
+          trivy image --severity HIGH,CRITICAL --ignore-unfixed "$IMAGE"
+          trivy image --severity HIGH,CRITICAL --ignore-unfixed --format json --output trivy-image.json "$IMAGE"
+          jq -r '.Results[]?.Vulnerabilities[]? | "\(.PkgName) \(.InstalledVersion) has \(.VulnerabilityID), fixed in \(.FixedVersion)"' trivy-image.json | sort -u > findings.txt
+          if [ -s findings.txt ]; then
+            while read -r line; do echo "::error title=Image scan::$line"; done < findings.txt
+            exit 1
+          fi
+          echo "::notice title=Image scan::No HIGH or CRITICAL vulnerability with a fix available"
+      - name: Write the SBOM (CycloneDX)
         run: trivy image --format cyclonedx --output sbom.cdx.json "$IMAGE"
-      - name: Seal the image into a file
-        run: docker save "$IMAGE" -o image.tar
+      - name: Save the image as a file for the next jobs
+        run: |
+          docker save "$IMAGE" -o image.tar
+          echo "::notice title=Image::$IMAGE $(docker image inspect --format '{{.Id}}' "$IMAGE"), $(( $(docker image inspect --format '{{.Size}}' "$IMAGE") / 1000000 )) MB"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image
@@ -119,35 +151,166 @@ jobs:
     env:
       IMAGE: gatekeeper:${{ github.sha }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: image
       - name: Load the image and start the app
+        id: app
         run: |
           docker load -i image.tar
           docker run -d --name gk -p 8080:8080 "$IMAGE"
-          for i in $(seq 1 20); do
-            curl -fs http://localhost:8080/health && break
+          for _ in $(seq 1 20); do
+            curl -fs http://localhost:8080/health && exit 0
             sleep 1
           done
-      - name: Let ZAP poke the running app
+          docker logs gk
+          exit 1
+      - name: Smoke test
+        run: |
+          fail=0
+          check() {
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8080$1")
+            if [ "$code" = "$2" ]; then echo "GET $1 -> $code"; else echo "::error title=Smoke test::GET $1 returned $code, expected $2"; fail=1; fi
+          }
+          check "/health" 200
+          check "/ping?host=not-an-ip" 400
+          check "/ping?host=127.0.0.1" 400
+          check "/ping?host=169.254.169.254" 400
+          check "/ping?host=1.1.1.1" 200
+          for h in content-security-policy x-content-type-options cross-origin-resource-policy permissions-policy cache-control; do
+            curl -sI http://localhost:8080/health | grep -qi "^$h:" || { echo "::error title=Smoke test::Header $h is missing"; fail=1; }
+          done
+          docker logs gk 2>&1 | tail -20
+          exit $fail
+      - name: ZAP baseline scan (gate)
+        if: ${{ !cancelled() && steps.app.outcome == 'success' }}
         run: |
           mkdir -p "$RUNNER_TEMP/zap"
-          chmod 777 "$RUNNER_TEMP/zap"
-          docker run --rm --network host -v "$RUNNER_TEMP/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:stable zap-baseline.py -t http://localhost:8080/health -I -r report.html
+          cp .zap/rules.tsv "$RUNNER_TEMP/zap/rules.tsv"
+          chmod -R 777 "$RUNNER_TEMP/zap"
+          docker pull --quiet "$ZAP_IMAGE"
+          echo "::notice title=ZAP image::$(docker image inspect --format '{{index .RepoDigests 0}}' "$ZAP_IMAGE")"
+          set +e
+          docker run --rm --network host -v "$RUNNER_TEMP/zap:/zap/wrk:rw" "$ZAP_IMAGE" \
+            zap-baseline.py -t http://localhost:8080/health -c rules.tsv -r report.html | tee "$RUNNER_TEMP/zap/zap.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          grep -E '^(WARN-NEW|FAIL-NEW|INFO|IGNORE): [^0-9]|^FAIL-NEW: [0-9]' "$RUNNER_TEMP/zap/zap.log" | while read -r line; do
+            echo "::notice title=ZAP::$line"
+          done
+          exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: ${{ !cancelled() }}
         with:
           name: zap-report
           path: ${{ runner.temp }}/zap/report.html
-          retention-days: 7
+          retention-days: 30
+
+  kubernetes:
+    needs: build-scan
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE: gatekeeper:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image
+      - name: Install kind and check its fingerprint
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o kind "https://github.com/kubernetes-sigs/kind/releases/download/v${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  kind" | sha256sum --check
+          sudo install -m 0755 kind /usr/local/bin/kind
+      - name: Create a local cluster and load the scanned image
+        run: |
+          docker load -i image.tar
+          docker tag "$IMAGE" gatekeeper:local
+          kind create cluster --name gatekeeper --wait 120s
+          kind load docker-image gatekeeper:local --name gatekeeper
+          kubectl version
+      - name: Create the namespace with Pod Security "restricted"
+        run: kubectl apply -f k8s/namespace.yaml
+      - name: A pod that breaks the policy must be rejected
+        run: |
+          if kubectl apply --dry-run=server -f k8s/tests/restricted-violation.yaml 2> psa.txt; then
+            echo "::error title=Pod Security::A pod without security settings was accepted"
+            exit 1
+          fi
+          cat psa.txt
+          echo "::notice title=Pod Security rejected the bad pod::$(tr '\n' ' ' < psa.txt)"
+      - name: Deploy the hardened workload
+        run: |
+          kubectl apply -f k8s/
+          kubectl -n gatekeeper rollout status deployment/gatekeeper --timeout=180s
+          kubectl -n gatekeeper get pods -o wide
+          echo "::notice title=Deployment::$(kubectl -n gatekeeper get deployment gatekeeper -o jsonpath='{.status.readyReplicas}') of 2 pods ready under Pod Security restricted"
+      - name: NetworkPolicy must block a client without the label, and allow one with it
+        run: |
+          probe() {
+            kubectl -n probe run "$1" --image=gatekeeper:local --image-pull-policy=Never --restart=Never ${2:+"$2"} \
+              --command -- python -c "
+          import sys, urllib.request
+          try:
+              print(urllib.request.urlopen('http://gatekeeper.gatekeeper.svc:8080/health', timeout=5).read().decode())
+          except Exception as error:
+              print('no answer:', error)
+              sys.exit(1)
+          " > /dev/null
+            for _ in $(seq 1 60); do
+              phase=$(kubectl -n probe get pod "$1" -o jsonpath='{.status.phase}')
+              case "$phase" in Succeeded|Failed) break ;; esac
+              sleep 2
+            done
+            echo "$1: $phase, $(kubectl -n probe logs "$1")"
+          }
+          blocked=$(probe no-label "")
+          allowed=$(probe with-label "--labels=access=true")
+          echo "$blocked"; echo "$allowed"
+          echo "::notice title=NetworkPolicy::$blocked | $allowed"
+          case "$blocked" in no-label:\ Failed*) ;; *) echo "::error title=NetworkPolicy::The unlabelled pod was not blocked"; exit 1 ;; esac
+          case "$allowed" in with-label:\ Succeeded*) ;; *) echo "::error title=NetworkPolicy::The labelled pod could not connect"; exit 1 ;; esac
+      - name: Cluster events (only on failure)
+        if: failure()
+        run: kubectl get events -A --sort-by=.lastTimestamp | tail -40
 
   publish:
-    needs: [build-scan, dast]
+    needs: [build-scan, dast, kubernetes]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      id-token: write
+      id-token: write # the only job allowed to ask GitHub for an OIDC token
+    env:
+      IMAGE: gatekeeper:${{ github.sha }}
+      # Not a secret: knowing the ARN is useless without a token that matches its trust policy.
+      AWS_ROLE_ARN: arn:aws:iam::843109108746:role/gatekeeper-pipeline
+      ECR_REGISTRY: 843109108746.dkr.ecr.eu-west-3.amazonaws.com
     steps:
-      - run: echo "get a boarding pass, assume the Day 2 role, push to ECR"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: image
+      - name: Get short-lived AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: gatekeeper-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Log in to ECR
+        run: aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+      - name: Push the exact image that was scanned and tested
+        run: |
+          docker load -i image.tar
+          target="$ECR_REGISTRY/gatekeeper:$GITHUB_SHA"
+          docker tag "$IMAGE" "$target"
+          docker push "$target" | tee push.log
+          digest=$(grep -oE 'sha256:[0-9a-f]{64}' push.log | tail -1)
+          echo "::notice title=Published::$target@$digest"
+      - name: Log out of ECR
+        if: always()
+        run: docker logout "$ECR_REGISTRY"
