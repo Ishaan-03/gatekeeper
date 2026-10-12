@@ -7,7 +7,7 @@ A secure delivery chain for a small containerised Python API, built with GitHub 
 | | Before | After |
 |---|---|---|
 | Container image size | 1.11 GB | 125 MB |
-| HIGH + CRITICAL CVEs in the image | 344 (19 CRITICAL) | 0 with a fix available, 0 CRITICAL |
+| HIGH + CRITICAL CVEs in the image | 344 (325 HIGH, 19 CRITICAL) | 44 HIGH, 0 CRITICAL, none with a fix available yet |
 | HIGH CVEs in Python dependencies | 3 | 0 |
 | Semgrep findings in my code | 5 | 0 |
 | Checkov failed checks | 6 | 0 (1 fixed, 5 skipped with a written reason) |
