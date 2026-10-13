@@ -133,3 +133,39 @@ That message almost always means the token's `sub` does not match the trust poli
 
 GitHub puts the numeric owner and repository IDs in the subject for this repository. The trust policy expected `repo:Ishaan-03/gatekeeper:ref:refs/heads/main`. I changed the Terraform to build the subject from the names and the IDs. IDs are never reused, so if this repository were deleted and someone created a new one with the same name, it could not assume the role.
 
+## Proving the gate works
+
+[Pull request #6](https://github.com/Ishaan-03/gatekeeper/pull/6) brings back the original flaw on purpose:
+
+```python
+out = subprocess.run(f"ping -c 1 {host}", shell=True, capture_output=True, text=True)
+```
+
+What happened ([run](https://github.com/Ishaan-03/gatekeeper/actions/runs/38358975443)):
+
+* `sast` failed, with three Semgrep rules annotated on that line: `subprocess-shell-true`, `dangerous-subprocess-use` and `subprocess-injection`
+* `build-scan`, `dast`, `kubernetes` and `publish` never started
+* Trying to merge it anyway was refused by the `protect-main` ruleset:
+
+```
+Repository rule violations found
+Required status check "sast" is failing.
+```
+
+A direct `git push` to `main` is refused as well (`GH013: Repository rule violations found`). The setting that makes the block real is the ruleset: a pull request is required for `main`, all seven gates are required checks, and nobody is on the bypass list. Without it, a red pipeline is only a warning. The pull request was closed without merging.
+
+## Publishing without a key
+
+The push to `main` that merged the documentation ([run #16](https://github.com/Ishaan-03/gatekeeper/actions/runs/38358607355)) passed every gate, and `publish` then:
+
+1. Asked GitHub for an OIDC token (only this job is allowed to)
+2. Exchanged it with AWS STS for credentials on `gatekeeper-pipeline` that expire within an hour
+3. Loaded the exact image file that had been scanned, attacked and deployed in kind
+4. Pushed it, tagged with the commit SHA:
+
+```
+843109108746.dkr.ecr.eu-west-3.amazonaws.com/gatekeeper:c80077f69d4f7199ef035bbb20bc248ec73078d5
+sha256:d7d7de65030f39b1817028c9d55a0ce607dd6bf8dc48a97ecd0f8fa1c9318390
+```
+
+There is no AWS access key in the repository, in GitHub secrets or in the workflow. The role's permissions allow pushing to this one repository and nothing else.
