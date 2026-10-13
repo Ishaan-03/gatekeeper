@@ -14,7 +14,7 @@ A secure delivery chain for a small containerised Python API, built with GitHub 
 | ZAP alerts (Medium / Low) | 1 / 3 | 0 / 0 |
 | AWS keys stored in CI | | 0 |
 
-**See it run:** [all pipeline runs](https://github.com/Ishaan-03/gatekeeper/actions/workflows/gatekeeper.yml)
+**See it run:** [a green run that published to ECR](https://github.com/Ishaan-03/gatekeeper/actions/runs/38358607355) · [a pull request the gates blocked](https://github.com/Ishaan-03/gatekeeper/pull/6) · [all pipeline runs](https://github.com/Ishaan-03/gatekeeper/actions/workflows/gatekeeper.yml)
 
 ## What is GATEKEEPER?
 
