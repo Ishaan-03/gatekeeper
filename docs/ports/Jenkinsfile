@@ -1,0 +1,109 @@
+// GATEKEEPER pipeline translated to a Jenkins declarative pipeline.
+// Translation of .github/workflows/gatekeeper.yml, not run.
+//
+// Jenkins has no built-in OIDC token for AWS. Here the agents run as pods in EKS
+// with a service account mapped to the pipeline role (IRSA), so no AWS key is stored.
+// Agents labelled 'docker' have Docker and Trivy 0.71.2 (checksum verified) installed.
+
+pipeline {
+  agent none
+
+  environment {
+    IMAGE         = "gatekeeper:${env.GIT_COMMIT}"
+    AWS_REGION    = 'eu-west-3'
+    ECR_REGISTRY  = '843109108746.dkr.ecr.eu-west-3.amazonaws.com'
+  }
+
+  options {
+    timeout(time: 30, unit: 'MINUTES')
+  }
+
+  stages {
+    stage('Scan') {
+      parallel {
+        stage('secrets') {
+          agent { docker { image 'ghcr.io/gitleaks/gitleaks:v8.21.2' } }
+          steps { sh 'gitleaks git -v --redact' }
+        }
+        stage('sast') {
+          agent { docker { image 'python:3.13-slim' } }
+          steps {
+            sh '''
+              pip install --quiet semgrep==1.178.0
+              semgrep scan --config p/python --config p/flask --metrics=off --error app/
+            '''
+          }
+        }
+        stage('iac') {
+          agent { docker { image 'python:3.13-slim' } }
+          steps {
+            sh '''
+              pip install --quiet checkov==3.3.19
+              checkov -d . --framework terraform dockerfile kubernetes --skip-path k8s/tests --quiet --compact
+            '''
+          }
+        }
+        stage('sca') {
+          agent { label 'docker' }
+          steps {
+            sh 'trivy fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 app/'
+          }
+        }
+      }
+    }
+
+    stage('build-scan') {
+      agent { label 'docker' }
+      steps {
+        sh '''
+          docker build -t "$IMAGE" .
+          trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+          trivy image --format cyclonedx --output sbom.cdx.json "$IMAGE"
+          docker save "$IMAGE" -o image.tar
+        '''
+        stash name: 'image', includes: 'image.tar'
+        archiveArtifacts artifacts: 'sbom.cdx.json'
+      }
+    }
+
+    stage('Test') {
+      parallel {
+        stage('dast') {
+          agent { label 'docker' }
+          steps {
+            unstash 'image'
+            sh '''
+              docker load -i image.tar
+              docker run -d --name gk -p 8080:8080 "$IMAGE"
+              docker run --rm --network host -v "$PWD/.zap:/zap/wrk:rw" \
+                ghcr.io/zaproxy/zaproxy:2.17.0@sha256:7aaa659b0d43078febd82e29bad112285c370727e86ab8340444220e17d9f0d2 \
+                zap-baseline.py -t http://localhost:8080/health -c rules.tsv -r report.html
+            '''
+          }
+          post { always { sh 'docker rm -f gk || true' } }
+        }
+        stage('kubernetes') {
+          agent { label 'docker' }
+          steps {
+            unstash 'image'
+            sh 'echo "kind create cluster, load the image, apply k8s/, run the Pod Security and NetworkPolicy tests"'
+          }
+        }
+      }
+    }
+
+    stage('publish') {
+      when { branch 'main' }
+      agent { kubernetes { serviceAccount 'jenkins-agent' } } // IRSA: the service account maps to gatekeeper-pipeline
+      steps {
+        unstash 'image'
+        sh '''
+          aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+          docker load -i image.tar
+          docker tag "$IMAGE" "$ECR_REGISTRY/gatekeeper:$GIT_COMMIT"
+          docker push "$ECR_REGISTRY/gatekeeper:$GIT_COMMIT"
+        '''
+      }
+    }
+  }
+}
