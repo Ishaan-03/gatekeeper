@@ -43,6 +43,10 @@ Three ideas shape the order:
 * **Build once, promote the same artifact.** The image is built once, scanned, and saved as a file (`docker save`). DAST, the Kubernetes tests and the push all load that exact file. Rebuilding for the push would produce a different, unscanned image.
 * **Traceability.** The image is tagged with the commit SHA, so every image in ECR maps to one commit.
 
+The first run with the scan gates, the image build, DAST and publish wired together, before the Kubernetes job was added:
+
+![First full pipeline run](../evidence/12-first-full-pipeline-run.png)
+
 ## DAST
 
 The `dast` job loads the saved image, starts it, and runs two checks against it.
