@@ -133,10 +133,3 @@ That message almost always means the token's `sub` does not match the trust poli
 
 GitHub puts the numeric owner and repository IDs in the subject for this repository. The trust policy expected `repo:Ishaan-03/gatekeeper:ref:refs/heads/main`. I changed the Terraform to build the subject from the names and the IDs. IDs are never reused, so if this repository were deleted and someone created a new one with the same name, it could not assume the role.
 
-## Proving the gate works
-
-PROOF_PLACEHOLDER
-
-## Publishing without a key
-
-PUBLISH_PLACEHOLDER
